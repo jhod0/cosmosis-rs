@@ -66,32 +66,49 @@ pub trait CosmosisDataType: Sized {
     fn put_datablock(&mut DataBlock, section: &str, name: &str, Self) -> CosmosisResult<()>;
 }
 
-impl CosmosisDataType for raw::c_int {
-    fn cosmosis_type() -> datablock_type_t {
-        datablock_type_t::DBT_INT
-    }
+macro_rules! gen_cosmosis_data_type {
+    ( $rust_name:ty, $cosmo_name:ident, $default_val:expr,
+      // Unfortunately, concat_idents! is unstable
+      $getter:path, $putter:path) => {
+        impl CosmosisDataType for $rust_name {
+            fn cosmosis_type() -> datablock_type_t {
+                datablock_type_t::$cosmo_name
+            }
 
-    fn get_datablock(db: &mut DataBlock, section: &str, name: &str) -> CosmosisResult<Self> {
-        let mut n: Self = 0;
-        let result = unsafe {
-            bindings::root::c_datablock_get_int(db.ptr,
-                                                ffi::CString::new(section).unwrap().as_ptr(),
-                                                ffi::CString::new(name).unwrap().as_ptr(),
-                                                &mut n)
-        };
-        wrap_cosmosis_result(n, result)
-    }
+            fn get_datablock(db: &mut DataBlock, section: &str, name: &str) -> CosmosisResult<Self> {
+                let mut n: Self = $default_val;
+                let result = unsafe {
+                    $getter(db.ptr,
+                            ffi::CString::new(section).unwrap().as_ptr(),
+                            ffi::CString::new(name).unwrap().as_ptr(),
+                            &mut n)
+                };
+                wrap_cosmosis_result(n, result)
+            }
 
-    fn put_datablock(db: &mut DataBlock, section: &str, name: &str, n: Self) -> CosmosisResult<()> {
-        let result = unsafe {
-            bindings::root::c_datablock_put_int(db.ptr,
-                                                ffi::CString::new(section).unwrap().as_ptr(),
-                                                ffi::CString::new(name).unwrap().as_ptr(),
-                                                n)
-        };
-        wrap_cosmosis_result((), result)
+            fn put_datablock(db: &mut DataBlock, section: &str, name: &str, obj: Self) -> CosmosisResult<()> {
+                let result = unsafe {
+                    $putter(db.ptr,
+                            ffi::CString::new(section).unwrap().as_ptr(),
+                            ffi::CString::new(name).unwrap().as_ptr(),
+                            obj)
+                };
+                wrap_cosmosis_result((), result)
+            }
+        }
     }
 }
+
+gen_cosmosis_data_type!(raw::c_int, DBT_INT, 0,
+                        bindings::root::c_datablock_get_int,
+                        bindings::root::c_datablock_put_int);
+gen_cosmosis_data_type!(bool, DBT_BOOL, false,
+                        bindings::root::c_datablock_get_bool,
+                        bindings::root::c_datablock_put_bool);
+gen_cosmosis_data_type!(f64, DBT_DOUBLE, 0.0,
+                        bindings::root::c_datablock_get_double,
+                        bindings::root::c_datablock_put_double);
+
 
 #[cfg(test)]
 mod tests {
@@ -110,6 +127,8 @@ mod tests {
         for (name, val) in numbers.iter() {
             assert!(db.get::<raw::c_int>("my_section", name).expect("should be present")
                     == *val);
+            assert!(db.get::<f64>("my_section", name).unwrap_err()
+                    == DATABLOCK_STATUS::DBS_WRONG_VALUE_TYPE);
         }
 
         for name in ["four", "five", "six", "seven", "eight"].iter() {
