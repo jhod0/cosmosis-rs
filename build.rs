@@ -40,6 +40,7 @@ fn main() {
          .whitelist_function("c_datablock_get_value_name")
          .whitelist_function("c_datablock_num_values")
          .whitelist_function("c_datablock_get_type")
+         .whitelist_function("c_datablock_get_array_length")
          /* Simple getters */
          .whitelist_function("c_datablock_get_int")
          .whitelist_function("c_datablock_get_bool")
@@ -63,13 +64,13 @@ fn main() {
          .whitelist_function("c_datablock_get_double_array_1d_preallocated")
          .whitelist_function("c_datablock_get_complex_array_1d_preallocated")
          /* Putting 1D arrays */
-         .whitelist_function("c_datablock_put_int_array_1d_preallocated")
-         .whitelist_function("c_datablock_put_double_array_1d_preallocated")
-         .whitelist_function("c_datablock_put_complex_array_1d_preallocated")
+         .whitelist_function("c_datablock_put_int_array_1d")
+         .whitelist_function("c_datablock_put_double_array_1d")
+         .whitelist_function("c_datablock_put_complex_array_1d")
          /* Replacing 1D arrays */
-         .whitelist_function("c_datablock_replace_int_array_1d_preallocated")
-         .whitelist_function("c_datablock_replace_double_array_1d_preallocated")
-         .whitelist_function("c_datablock_replace_complex_array_1d_preallocated")
+         .whitelist_function("c_datablock_replace_int_array_1d")
+         .whitelist_function("c_datablock_replace_double_array_1d")
+         .whitelist_function("c_datablock_replace_complex_array_1d")
          /* TODO: Neglecting higher-dimensional arrays */
          .generate()
          .expect("Error generating bindings");
