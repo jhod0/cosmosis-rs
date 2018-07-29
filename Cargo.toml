@@ -3,5 +3,8 @@ name = "cosmosis"
 version = "0.1.0"
 authors = ["Jackson O'Donnell <jacksonhodonnell@gmail.com>"]
 
+[dependencies]
+libc = "*"
+
 [build-dependencies]
 bindgen = "0.37.*"
