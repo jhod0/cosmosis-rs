@@ -1,6 +1,7 @@
 extern crate libc;
 
-use std::convert;
+use std::borrow::Borrow;
+use std::convert::From;
 use std::error;
 use std::ffi::{CStr, CString};
 use std::fmt;
@@ -81,7 +82,7 @@ impl error::Error for CosmosisError {
     }
 }
 
-impl convert::From<DATABLOCK_STATUS> for CosmosisError {
+impl From<DATABLOCK_STATUS> for CosmosisError {
     fn from(obj: DATABLOCK_STATUS) -> Self {
         CosmosisError { kind: obj, reason: None }
     }
@@ -141,6 +142,24 @@ impl DataBlock {
         Default::default()
     }
 
+    /// Whether or not the datablock contains a value `name` in the section
+    /// `section`.
+    pub fn contains(&self, section: &str, name: &str) -> bool {
+        unsafe {
+            bindings::root::c_datablock_has_value(self.ptr,
+                                                 CString::new(section).unwrap().as_ptr(),
+                                                 CString::new(name).unwrap().as_ptr())
+        }
+    }
+
+    /// Whether or not this `DataBlock` contains a section of the given name.
+    pub fn contains_section(&self, section: &str) -> bool {
+        unsafe {
+            bindings::root::c_datablock_has_section(self.ptr,
+                                                    CString::new(section).unwrap().as_ptr())
+        }
+    }
+
     /// Returns the type of the DataBlock entry, or `None` if no such entry exists.
     pub fn get_type(&self, section: &str, name: &str) -> Option<datablock_type_t> {
         let mut ty: datablock_type_t = datablock_type_t::DBT_UNKNOWN;
@@ -164,24 +183,39 @@ impl DataBlock {
     }
 
     /// Store a new value in a DataBlock. Fails if an entry already exists for `(section, name)`.
-    pub fn put<T>(&mut self, section: &str, name: &str, obj: T) -> CosmosisResult<()>
-        where T: CosmosisDataType {
-        T::put_datablock(self, section, name, obj)
+    // TODO this is too complicated, simplify it
+    pub fn put<CosmoType, Insert>(&mut self, section: &str, name: &str, obj: Insert) -> CosmosisResult<()>
+        where CosmoType: CosmosisDataType,
+              Insert: Borrow<CosmoType::InsertRepr> {
+        CosmoType::put_datablock(self, section, name, obj)
     }
 }
 
 /// Types which can be stored and retrieved from `DataBlock`s are `CosmosisDataType`s.
 pub trait CosmosisDataType: Sized {
+    type InsertRepr: ?Sized;
     fn cosmosis_type() -> datablock_type_t;
     fn get_datablock(&mut DataBlock, section: &str, name: &str) -> CosmosisResult<Self>;
-    fn put_datablock(&mut DataBlock, section: &str, name: &str, Self) -> CosmosisResult<()>;
+    fn put_datablock<T>(&mut DataBlock, section: &str, name: &str, obj: T) -> CosmosisResult<()>
+        where T: Borrow<Self::InsertRepr>;
+}
+
+pub trait CosmosisGettable: Sized {
+    type InternalType: CosmosisDataType;
+    fn get_datablock(&mut DataBlock, section: &str, name: &str) -> CosmosisResult<Self>;
+}
+
+pub trait CosmosisStorable: Sized {
+    type InternalType: CosmosisDataType;
+    fn insert_datablock(&mut DataBlock, section: &str, name: &str, Self) -> CosmosisResult<Option<Self>>;
 }
 
 macro_rules! gen_cosmosis_data_type {
     ( $rust_name:ty, $cosmo_name:ident, $default_val:expr,
       // Unfortunately, concat_idents! is unstable
-      $getter:path, $putter:path) => {
+      $getter:path, $putter:path ) => {
         impl CosmosisDataType for $rust_name {
+            type InsertRepr = Self;
             fn cosmosis_type() -> datablock_type_t {
                 datablock_type_t::$cosmo_name
             }
@@ -198,12 +232,13 @@ macro_rules! gen_cosmosis_data_type {
                                       section, name)
             }
 
-            fn put_datablock(db: &mut DataBlock, section: &str, name: &str, obj: Self) -> CosmosisResult<()> {
+            fn put_datablock<T>(db: &mut DataBlock, section: &str, name: &str, obj: T) -> CosmosisResult<()>
+                where T: Borrow<$rust_name> {
                 let retval = unsafe {
                     $putter(db.ptr,
                             CString::new(section).unwrap().as_ptr(),
                             CString::new(name).unwrap().as_ptr(),
-                            obj)
+                            *obj.borrow())
                 };
                 wrap_cosmosis_result!(retval, (), "Could not put value at (section, name): ({}, {})",
                                       section, name)
@@ -227,6 +262,8 @@ gen_cosmosis_data_type!(Complex<f64>, DBT_COMPLEX, Complex { re: 0.0, im: 0.0 },
                         bindings::root::c_datablock_put_complex);
 
 impl CosmosisDataType for CString {
+    type InsertRepr = CStr;
+
     fn cosmosis_type() -> datablock_type_t {
         datablock_type_t::DBT_STRING
     }
@@ -253,12 +290,13 @@ impl CosmosisDataType for CString {
             "Could not get value at (section, name): ({}, {})", section, name)
     }
 
-    fn put_datablock(db: &mut DataBlock, section: &str, name: &str, obj: Self) -> CosmosisResult<()> {
+    fn put_datablock<T>(db: &mut DataBlock, section: &str, name: &str, obj: T) -> CosmosisResult<()>
+        where T: Borrow<CStr> {
         let retval = unsafe {
             bindings::root::c_datablock_put_string(db.ptr,
                                                    CString::new(section).unwrap().as_ptr(),
                                                    CString::new(name).unwrap().as_ptr(),
-                                                   obj.as_ptr())
+                                                   obj.borrow().as_ptr())
         };
         wrap_cosmosis_result!(retval, (), "Could not put value at (section, name): ({}, {})",
                               section, name)
@@ -276,10 +314,12 @@ mod tests {
         let numbers: Vec<(_, raw::c_int)> = vec![("one", 1), ("two", 2), ("three", 3)];
 
         for (name, val) in numbers.iter() {
-            assert!(db.put("my_section", name, *val).is_ok())
+            assert!(db.put::<raw::c_int, _>("my_section", name, *val).is_ok());
+            assert!(db.contains("my_section", name));
         }
 
         for (name, val) in numbers.iter() {
+            assert!(db.contains("my_section", name));
             assert!(db.get::<raw::c_int>("my_section", name).expect("should be present")
                     == *val);
             assert!(db.get::<f64>("my_section", name).unwrap_err().kind
@@ -288,7 +328,8 @@ mod tests {
 
         for name in ["four", "five", "six", "seven", "eight"].iter() {
             assert!(db.get::<raw::c_int>("my_section", name).unwrap_err().kind
-                    == DATABLOCK_STATUS::DBS_NAME_NOT_FOUND)
+                    == DATABLOCK_STATUS::DBS_NAME_NOT_FOUND);
+            assert!(!db.contains("my_section", name));
         }
     }
 
@@ -298,7 +339,7 @@ mod tests {
         let numbers: Vec<(_, f64)> = vec![("hello", 1.0), ("there", 3.2), ("pal", -1.324)];
 
         for (name, val) in numbers.iter() {
-            assert!(db.put("my_section", name, *val).is_ok())
+            assert!(db.put::<f64, _>("my_section", name, *val).is_ok())
         }
 
         for (name, _) in numbers.iter() {
@@ -306,6 +347,10 @@ mod tests {
                     == DATABLOCK_STATUS::DBS_WRONG_VALUE_TYPE);
             assert!(db.get_type("my_section", name).unwrap()
                     == datablock_type_t::DBT_DOUBLE);
+        }
+
+        for name in ["four", "five", "six", "seven", "eight"].iter() {
+            assert!(db.get_type("my_section", name).is_none());
         }
     }
 }
