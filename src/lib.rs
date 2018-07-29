@@ -95,7 +95,7 @@ impl CosmosisDataType for raw::c_int {
 
 #[cfg(test)]
 mod tests {
-    use super::{DataBlock, CosmosisDataType};
+    use super::{DataBlock, DATABLOCK_STATUS};
     use std::os::raw;
 
     #[test]
@@ -110,6 +110,11 @@ mod tests {
         for (name, val) in numbers.iter() {
             assert!(db.get::<raw::c_int>("my_section", name).expect("should be present")
                     == *val);
+        }
+
+        for name in ["four", "five", "six", "seven", "eight"].iter() {
+            assert!(db.get::<raw::c_int>("my_section", name).unwrap_err()
+                    == DATABLOCK_STATUS::DBS_NAME_NOT_FOUND)
         }
     }
 }
