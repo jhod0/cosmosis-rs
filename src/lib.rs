@@ -176,18 +176,30 @@ impl DataBlock {
         }
     }
 
+    /// Whether or not the `DataBlock` contains an entry with the given `section`
+    /// and `name`, of the type `C`. If the entry is of a different type, or if
+    /// the there is no such entry, returns false.
+    pub fn is_type<C: CosmosisGettable>(&self, section: &str, name: &str) -> bool {
+        self.get_type(section, name).map(|t| t == C::InternalType::cosmosis_type()).unwrap_or(false)
+    }
+
     /// Retrieve a value from a DataBlock.
-    pub fn get<T>(&mut self, section: &str, name: &str) -> CosmosisResult<T>
-        where T: CosmosisDataType {
+    pub fn get<T>(&self, section: &str, name: &str) -> CosmosisResult<T>
+        where T: CosmosisGettable {
         T::get_datablock(self, section, name)
     }
 
+    pub fn insert<T, I>(&mut self, section: &str, name: &str, obj: I) -> CosmosisResult<Option<T>>
+        where T: CosmosisStorable,
+              I: Borrow<T> {
+        T::insert_datablock(self, section, name, obj.borrow())
+    }
+
     /// Store a new value in a DataBlock. Fails if an entry already exists for `(section, name)`.
-    // TODO this is too complicated, simplify it
-    pub fn put<CosmoType, Insert>(&mut self, section: &str, name: &str, obj: Insert) -> CosmosisResult<()>
-        where CosmoType: CosmosisDataType,
-              Insert: Borrow<CosmoType::InsertRepr> {
-        CosmoType::put_datablock(self, section, name, obj)
+    pub fn put<T, I>(&mut self, section: &str, name: &str, obj: I) -> CosmosisResult<()>
+        where T: CosmosisStorable,
+              I: Borrow<T> {
+        T::put_datablock(self, section, name, obj.borrow())
     }
 }
 
@@ -195,32 +207,62 @@ impl DataBlock {
 pub trait CosmosisDataType: Sized {
     type InsertRepr: ?Sized;
     fn cosmosis_type() -> datablock_type_t;
-    fn get_datablock(&mut DataBlock, section: &str, name: &str) -> CosmosisResult<Self>;
-    fn put_datablock<T>(&mut DataBlock, section: &str, name: &str, obj: T) -> CosmosisResult<()>
-        where T: Borrow<Self::InsertRepr>;
+    fn direct_get_datablock(&DataBlock, section: &str, name: &str) -> CosmosisResult<Self>;
+    fn direct_put_datablock(&mut DataBlock, section: &str, name: &str, obj: &Self::InsertRepr) -> CosmosisResult<()>;
+    fn direct_replace_datablock(&mut DataBlock, section: &str, name: &str, obj: &Self::InsertRepr) -> CosmosisResult<Self>;
 }
 
+/// Represents types which may be retrieved from a `DataBlock`.
 pub trait CosmosisGettable: Sized {
     type InternalType: CosmosisDataType;
-    fn get_datablock(&mut DataBlock, section: &str, name: &str) -> CosmosisResult<Self>;
+    fn get_datablock(&DataBlock, section: &str, name: &str) -> CosmosisResult<Self>;
 }
 
+impl<T> CosmosisGettable for T where T: CosmosisDataType {
+    type InternalType = Self;
+    fn get_datablock(db: &DataBlock, section: &str, name: &str) -> CosmosisResult<Self> {
+        Self::direct_get_datablock(db, section, name)
+    }
+}
+
+/// Represents types which may be stored in a `DataBlock`.
 pub trait CosmosisStorable: Sized {
     type InternalType: CosmosisDataType;
-    fn insert_datablock(&mut DataBlock, section: &str, name: &str, Self) -> CosmosisResult<Option<Self>>;
+    fn put_datablock(&mut DataBlock, section: &str, name: &str, obj: &Self) -> CosmosisResult<()>;
+    fn replace_datablock(&mut DataBlock, section: &str, name: &str, obj: &Self) -> CosmosisResult<Self>;
+    fn insert_datablock(&mut DataBlock, section: &str, name: &str, &Self) -> CosmosisResult<Option<Self>>;
+}
+
+impl<T> CosmosisStorable for T where T: CosmosisDataType<InsertRepr=T> {
+    type InternalType = Self;
+    fn put_datablock(db: &mut DataBlock, section: &str, name: &str, obj: &Self) -> CosmosisResult<()> {
+        Self::direct_put_datablock(db, section, name, obj)
+    }
+    fn replace_datablock(db: &mut DataBlock, section: &str, name: &str, obj: &Self) -> CosmosisResult<Self> {
+        Self::direct_replace_datablock(db, section, name, obj)
+    }
+    fn insert_datablock(db: &mut DataBlock, section: &str, name: &str, obj: &Self) -> CosmosisResult<Option<Self>> {
+        if db.contains(section, name) {
+            Self::replace_datablock(db, section, name, obj)
+               .map(|s| Some(s))
+        } else {
+            Self::put_datablock(db, section, name, obj)
+               .map(|()| None)
+        }
+    }
 }
 
 macro_rules! gen_cosmosis_data_type {
     ( $rust_name:ty, $cosmo_name:ident, $default_val:expr,
       // Unfortunately, concat_idents! is unstable
-      $getter:path, $putter:path ) => {
+      $getter:path, $putter:path, $replacer:path ) => {
         impl CosmosisDataType for $rust_name {
             type InsertRepr = Self;
             fn cosmosis_type() -> datablock_type_t {
                 datablock_type_t::$cosmo_name
             }
 
-            fn get_datablock(db: &mut DataBlock, section: &str, name: &str) -> CosmosisResult<Self> {
+            fn direct_get_datablock(db: &DataBlock, section: &str, name: &str) -> CosmosisResult<Self> {
                 let mut n: Self = $default_val;
                 let retval = unsafe {
                     $getter(db.ptr,
@@ -232,17 +274,27 @@ macro_rules! gen_cosmosis_data_type {
                                       section, name)
             }
 
-            fn put_datablock<T>(db: &mut DataBlock, section: &str, name: &str, obj: T) -> CosmosisResult<()>
-                where T: Borrow<$rust_name> {
+            fn direct_put_datablock(db: &mut DataBlock, section: &str, name: &str, obj: &$rust_name) -> CosmosisResult<()> {
                 let retval = unsafe {
                     $putter(db.ptr,
                             CString::new(section).unwrap().as_ptr(),
                             CString::new(name).unwrap().as_ptr(),
-                            *obj.borrow())
+                            *obj)
                 };
                 wrap_cosmosis_result!(retval, (), "Could not put value at (section, name): ({}, {})",
                                       section, name)
+            }
 
+            fn direct_replace_datablock(db: &mut DataBlock, section: &str, name: &str, obj: &$rust_name) -> CosmosisResult<Self> {
+                let result = Self::direct_get_datablock(db, section, name)?;
+                let retval = unsafe {
+                    $replacer(db.ptr,
+                              CString::new(section).unwrap().as_ptr(),
+                              CString::new(name).unwrap().as_ptr(),
+                              *obj)
+                };
+                wrap_cosmosis_result!(retval, result, "Could not get value at (section, name): ({}, {})",
+                                      section, name)
             }
         }
     }
@@ -250,16 +302,20 @@ macro_rules! gen_cosmosis_data_type {
 
 gen_cosmosis_data_type!(raw::c_int, DBT_INT, 0,
                         bindings::root::c_datablock_get_int,
-                        bindings::root::c_datablock_put_int);
+                        bindings::root::c_datablock_put_int,
+                        bindings::root::c_datablock_replace_int);
 gen_cosmosis_data_type!(bool, DBT_BOOL, false,
                         bindings::root::c_datablock_get_bool,
-                        bindings::root::c_datablock_put_bool);
+                        bindings::root::c_datablock_put_bool,
+                        bindings::root::c_datablock_replace_bool);
 gen_cosmosis_data_type!(f64, DBT_DOUBLE, 0.0,
                         bindings::root::c_datablock_get_double,
-                        bindings::root::c_datablock_put_double);
+                        bindings::root::c_datablock_put_double,
+                        bindings::root::c_datablock_replace_double);
 gen_cosmosis_data_type!(Complex<f64>, DBT_COMPLEX, Complex { re: 0.0, im: 0.0 },
                         bindings::root::c_datablock_get_complex,
-                        bindings::root::c_datablock_put_complex);
+                        bindings::root::c_datablock_put_complex,
+                        bindings::root::c_datablock_replace_complex);
 
 impl CosmosisDataType for CString {
     type InsertRepr = CStr;
@@ -268,7 +324,7 @@ impl CosmosisDataType for CString {
         datablock_type_t::DBT_STRING
     }
 
-    fn get_datablock(db: &mut DataBlock, section: &str, name: &str) -> CosmosisResult<Self> {
+    fn direct_get_datablock(db: &DataBlock, section: &str, name: &str) -> CosmosisResult<Self> {
         let mut cstr: *mut raw::c_char = std::ptr::null_mut();
         let retval = unsafe {
             bindings::root::c_datablock_get_string(db.ptr,
@@ -290,16 +346,79 @@ impl CosmosisDataType for CString {
             "Could not get value at (section, name): ({}, {})", section, name)
     }
 
-    fn put_datablock<T>(db: &mut DataBlock, section: &str, name: &str, obj: T) -> CosmosisResult<()>
-        where T: Borrow<CStr> {
+    fn direct_put_datablock(db: &mut DataBlock, section: &str, name: &str, obj: &CStr) -> CosmosisResult<()> {
         let retval = unsafe {
             bindings::root::c_datablock_put_string(db.ptr,
                                                    CString::new(section).unwrap().as_ptr(),
                                                    CString::new(name).unwrap().as_ptr(),
-                                                   obj.borrow().as_ptr())
+                                                   obj.as_ptr())
         };
         wrap_cosmosis_result!(retval, (), "Could not put value at (section, name): ({}, {})",
                               section, name)
+    }
+
+    fn direct_replace_datablock(db: &mut DataBlock, section: &str, name: &str, obj: &CStr) -> CosmosisResult<Self> {
+        let result = Self::direct_get_datablock(db, section, name)?;
+        let retval = unsafe {
+            bindings::root::c_datablock_replace_string(db.ptr,
+                                                       CString::new(section).unwrap().as_ptr(),
+                                                       CString::new(name).unwrap().as_ptr(),
+                                                       obj.as_ptr())
+        };
+        wrap_cosmosis_result!(retval, result,
+                              "Could not replace value at (section, name): ({}, {})", section, name)
+    }
+}
+
+impl CosmosisDataType for Vec<f64> {
+    type InsertRepr = [f64];
+
+    fn cosmosis_type() -> datablock_type_t {
+        datablock_type_t::DBT_DOUBLE1D
+    }
+
+    fn direct_get_datablock(db: &DataBlock, section: &str, name: &str) -> CosmosisResult<Self> {
+        let mut size = unsafe {
+            bindings::root::c_datablock_get_array_length(db.ptr,
+                                                         CString::new(section).unwrap().as_ptr(),
+                                                         CString::new(name).unwrap().as_ptr())
+        };
+        if size < 0 {
+            if db.contains(section, name) {
+                Err(DATABLOCK_STATUS::DBS_WRONG_VALUE_TYPE)
+            } else {
+                Err(DATABLOCK_STATUS::DBS_NAME_NOT_FOUND)
+            }?
+        } else {
+            let mut vec = Vec::with_capacity(size as usize);
+            let retval = unsafe {
+                bindings::root::c_datablock_get_double_array_1d_preallocated(db.ptr,
+                                                         CString::new(section).unwrap().as_ptr(),
+                                                         CString::new(name).unwrap().as_ptr(),
+                                                         vec.as_mut_ptr(),
+                                                         &mut size,
+                                                         size)
+            };
+            wrap_cosmosis_result!(retval, vec,
+                                  "Could not get value at (section, name): ({}, {})", section, name)
+        }
+    }
+
+    fn direct_put_datablock(db: &mut DataBlock, section: &str, name: &str, obj: &Self::InsertRepr) -> CosmosisResult<()> {
+        let retval = unsafe {
+            bindings::root::c_datablock_put_double_array_1d(db.ptr,
+                                                            CString::new(section).unwrap().as_ptr(),
+                                                            CString::new(name).unwrap().as_ptr(),
+                                                            obj.as_ptr(),
+                                                            obj.len() as raw::c_int)
+        };
+        wrap_cosmosis_result!(retval, (), "Could not put value at (section, name): ({}, {})",
+                              section, name)
+    }
+
+    fn direct_replace_datablock(_db: &mut DataBlock, _section: &str, _name: &str, _obj: &Self::InsertRepr) -> CosmosisResult<Self> {
+        // TODO implement
+        unimplemented!()
     }
 }
 
@@ -314,7 +433,7 @@ mod tests {
         let numbers: Vec<(_, raw::c_int)> = vec![("one", 1), ("two", 2), ("three", 3)];
 
         for (name, val) in numbers.iter() {
-            assert!(db.put::<raw::c_int, _>("my_section", name, *val).is_ok());
+            assert!(db.put("my_section", name, *val).is_ok());
             assert!(db.contains("my_section", name));
         }
 
@@ -339,7 +458,7 @@ mod tests {
         let numbers: Vec<(_, f64)> = vec![("hello", 1.0), ("there", 3.2), ("pal", -1.324)];
 
         for (name, val) in numbers.iter() {
-            assert!(db.put::<f64, _>("my_section", name, *val).is_ok())
+            assert!(db.put("my_section", name, *val).is_ok())
         }
 
         for (name, _) in numbers.iter() {
@@ -351,6 +470,24 @@ mod tests {
 
         for name in ["four", "five", "six", "seven", "eight"].iter() {
             assert!(db.get_type("my_section", name).is_none());
+        }
+    }
+
+    #[test]
+    fn test_replace() {
+        let mut db = DataBlock::new();
+        let numbers: Vec<(_, raw::c_int)> = vec![("one", 1), ("two", 2), ("three", 3)];
+
+        for (name, val) in numbers.iter() {
+            assert!(db.put("my_section", name, *val).is_ok());
+            assert!(db.contains("my_section", name));
+        }
+
+        for (name, val) in numbers.iter() {
+            let inserted = db.insert("my_section", name, *val + 1).unwrap();
+            assert!(inserted.is_some());
+            assert!(inserted.unwrap() == *val);
+            assert!(db.get::<raw::c_int>("my_section", name).unwrap() == *val + 1);
         }
     }
 }
