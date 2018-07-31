@@ -202,7 +202,7 @@ impl DataBlock {
     /// Stores the given object into the `DataBlock`, associated with the given section and name.
     /// If an object is already stored (of the same type) in that name, replaces and returns that
     /// previous value; if the name does not exist already in the `DataBlock`, creates a new entry.
-    pub fn insert<T, I>(&mut self, section: &str, name: &str, obj: I) -> CosmosisResult<Option<T>>
+    pub fn insert<T, I>(&mut self, section: &str, name: &str, obj: I) -> CosmosisResult<Option<T::ResultType>>
         where T: CosmosisStorable,
               I: Borrow<T> {
         if self.contains(section, name) {
@@ -216,7 +216,7 @@ impl DataBlock {
 
     /// Store a new value in a DataBlock. Fails if an entry already exists for `(section, name)`.
     pub fn put<T, I>(&mut self, section: &str, name: &str, obj: I) -> CosmosisResult<()>
-        where T: CosmosisStorable,
+        where T: CosmosisStorable + ?Sized,
               I: Borrow<T> {
         T::put_datablock(self, section, name, obj.borrow())
     }
@@ -245,14 +245,16 @@ impl<T> CosmosisGettable for T where T: CosmosisDataType {
 }
 
 /// Represents types which may be stored in a `DataBlock`.
-pub trait CosmosisStorable: Sized {
+pub trait CosmosisStorable {
     type InternalType: CosmosisDataType;
+    type ResultType: CosmosisGettable;
     fn put_datablock(&mut DataBlock, section: &str, name: &str, obj: &Self) -> CosmosisResult<()>;
-    fn replace_datablock(&mut DataBlock, section: &str, name: &str, obj: &Self) -> CosmosisResult<Self>;
+    fn replace_datablock(&mut DataBlock, section: &str, name: &str, obj: &Self) -> CosmosisResult<Self::ResultType>;
 }
 
 impl<T> CosmosisStorable for T where T: CosmosisDataType<InsertRepr=T> {
     type InternalType = Self;
+    type ResultType = Self;
     fn put_datablock(db: &mut DataBlock, section: &str, name: &str, obj: &Self) -> CosmosisResult<()> {
         Self::direct_put_datablock(db, section, name, obj)
     }
@@ -405,6 +407,7 @@ impl CosmosisDataType for Vec<f64> {
         } else {
             let mut vec = Vec::with_capacity(size as usize);
             let retval = unsafe {
+                vec.set_len(size as usize);
                 bindings::root::c_datablock_get_double_array_1d_preallocated(db.ptr,
                                                          CString::new(section).unwrap().as_ptr(),
                                                          CString::new(name).unwrap().as_ptr(),
@@ -443,6 +446,17 @@ impl CosmosisDataType for Vec<f64> {
     }
 }
 
+impl CosmosisStorable for [f64] {
+    type InternalType = Vec<f64>;
+    type ResultType = Vec<f64>;
+    fn put_datablock(db: &mut DataBlock, section: &str, name: &str, obj: &Self) -> CosmosisResult<()> {
+        Self::InternalType::direct_put_datablock(db, section, name, obj)
+    }
+    fn replace_datablock(db: &mut DataBlock, section: &str, name: &str, obj: &Self) -> CosmosisResult<Self::ResultType> {
+        Self::InternalType::direct_replace_datablock(db, section, name, obj)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{DataBlock, DATABLOCK_STATUS, datablock_type_t};
@@ -460,15 +474,15 @@ mod tests {
 
         for (name, val) in numbers.iter() {
             assert!(db.contains("my_section", name));
-            assert!(db.get::<raw::c_int>("my_section", name).expect("should be present")
-                    == *val);
-            assert!(db.get::<f64>("my_section", name).unwrap_err().kind
-                    == DATABLOCK_STATUS::DBS_WRONG_VALUE_TYPE);
+            assert_eq!(db.get::<raw::c_int>("my_section", name).expect("should be present"),
+                       *val);
+            assert_eq!(db.get::<f64>("my_section", name).unwrap_err().kind,
+                       DATABLOCK_STATUS::DBS_WRONG_VALUE_TYPE);
         }
 
         for name in ["four", "five", "six", "seven", "eight"].iter() {
-            assert!(db.get::<raw::c_int>("my_section", name).unwrap_err().kind
-                    == DATABLOCK_STATUS::DBS_NAME_NOT_FOUND);
+            assert_eq!(db.get::<raw::c_int>("my_section", name).unwrap_err().kind,
+                       DATABLOCK_STATUS::DBS_NAME_NOT_FOUND);
             assert!(!db.contains("my_section", name));
         }
     }
@@ -483,10 +497,10 @@ mod tests {
         }
 
         for (name, _) in numbers.iter() {
-            assert!(db.get::<raw::c_int>("my_section", name).unwrap_err().kind
-                    == DATABLOCK_STATUS::DBS_WRONG_VALUE_TYPE);
-            assert!(db.get_type("my_section", name).unwrap()
-                    == datablock_type_t::DBT_DOUBLE);
+            assert_eq!(db.get::<raw::c_int>("my_section", name).unwrap_err().kind,
+                       DATABLOCK_STATUS::DBS_WRONG_VALUE_TYPE);
+            assert_eq!(db.get_type("my_section", name).unwrap(),
+                       datablock_type_t::DBT_DOUBLE);
         }
 
         for name in ["four", "five", "six", "seven", "eight"].iter() {
@@ -507,8 +521,27 @@ mod tests {
         for (name, val) in numbers.iter() {
             let inserted = db.insert("my_section", name, *val + 1).unwrap();
             assert!(inserted.is_some());
-            assert!(inserted.unwrap() == *val);
-            assert!(db.get::<raw::c_int>("my_section", name).unwrap() == *val + 1);
+            assert_eq!(inserted.unwrap(), *val);
+            assert_eq!(db.get::<raw::c_int>("my_section", name).unwrap(), *val + 1);
+        }
+    }
+
+    #[test]
+    fn test_put_get_vec() {
+        let mut db = DataBlock::new();
+        let data: Vec<(_, Vec<f64>)> = vec![("one", vec![1.0, 2.0, 3.0]),
+                                            ("two", vec![0.0, 2.0, 4.0]),
+                                            ("archnemesis", vec![5.0, 6.0, 7.0])];
+
+        for (name, val) in data.iter() {
+            assert!(db.put::<[f64], &[f64]>("my_section", name, val).is_ok());
+            assert!(db.contains("my_section", name));
+        }
+
+        for (name, val) in data.iter() {
+            assert!(db.contains("my_section", name));
+            assert_eq!(db.get::<Vec<f64>>("my_section", name).expect("should be present"), &val[..]);
+            assert_eq!(db.get::<f64>("my_section", name).unwrap_err().kind, DATABLOCK_STATUS::DBS_WRONG_VALUE_TYPE);
         }
     }
 }
