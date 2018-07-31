@@ -52,6 +52,16 @@ pub struct CosmosisError {
     reason: Option<String>
 }
 
+impl CosmosisError {
+    pub fn new(kind: DATABLOCK_STATUS) -> Self {
+        CosmosisError { kind, reason: None }
+    }
+
+    pub fn with_reason(self, reason: String) -> Self {
+        CosmosisError { reason: Some(reason), ..self }
+    }
+}
+
 impl fmt::Display for CosmosisError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "CosmosisError")?;
@@ -189,10 +199,19 @@ impl DataBlock {
         T::get_datablock(self, section, name)
     }
 
+    /// Stores the given object into the `DataBlock`, associated with the given section and name.
+    /// If an object is already stored (of the same type) in that name, replaces and returns that
+    /// previous value; if the name does not exist already in the `DataBlock`, creates a new entry.
     pub fn insert<T, I>(&mut self, section: &str, name: &str, obj: I) -> CosmosisResult<Option<T>>
         where T: CosmosisStorable,
               I: Borrow<T> {
-        T::insert_datablock(self, section, name, obj.borrow())
+        if self.contains(section, name) {
+            T::replace_datablock(self, section, name, obj.borrow())
+               .map(|s| Some(s))
+        } else {
+            T::put_datablock(self, section, name, obj.borrow())
+               .map(|()| None)
+        }
     }
 
     /// Store a new value in a DataBlock. Fails if an entry already exists for `(section, name)`.
@@ -230,7 +249,6 @@ pub trait CosmosisStorable: Sized {
     type InternalType: CosmosisDataType;
     fn put_datablock(&mut DataBlock, section: &str, name: &str, obj: &Self) -> CosmosisResult<()>;
     fn replace_datablock(&mut DataBlock, section: &str, name: &str, obj: &Self) -> CosmosisResult<Self>;
-    fn insert_datablock(&mut DataBlock, section: &str, name: &str, &Self) -> CosmosisResult<Option<Self>>;
 }
 
 impl<T> CosmosisStorable for T where T: CosmosisDataType<InsertRepr=T> {
@@ -240,15 +258,6 @@ impl<T> CosmosisStorable for T where T: CosmosisDataType<InsertRepr=T> {
     }
     fn replace_datablock(db: &mut DataBlock, section: &str, name: &str, obj: &Self) -> CosmosisResult<Self> {
         Self::direct_replace_datablock(db, section, name, obj)
-    }
-    fn insert_datablock(db: &mut DataBlock, section: &str, name: &str, obj: &Self) -> CosmosisResult<Option<Self>> {
-        if db.contains(section, name) {
-            Self::replace_datablock(db, section, name, obj)
-               .map(|s| Some(s))
-        } else {
-            Self::put_datablock(db, section, name, obj)
-               .map(|()| None)
-        }
     }
 }
 
@@ -385,10 +394,14 @@ impl CosmosisDataType for Vec<f64> {
         };
         if size < 0 {
             if db.contains(section, name) {
-                Err(DATABLOCK_STATUS::DBS_WRONG_VALUE_TYPE)
+                Err(CosmosisError::new(DATABLOCK_STATUS::DBS_WRONG_VALUE_TYPE)
+                                  .with_reason(format!("Not a 1D Double array at (section, name): ({}, {})",
+                                                       section, name)))
             } else {
-                Err(DATABLOCK_STATUS::DBS_NAME_NOT_FOUND)
-            }?
+                Err(CosmosisError::new(DATABLOCK_STATUS::DBS_NAME_NOT_FOUND)
+                                  .with_reason(format!("No value at (section, name): ({}, {})",
+                                                       section, name)))
+            }
         } else {
             let mut vec = Vec::with_capacity(size as usize);
             let retval = unsafe {
@@ -416,9 +429,17 @@ impl CosmosisDataType for Vec<f64> {
                               section, name)
     }
 
-    fn direct_replace_datablock(_db: &mut DataBlock, _section: &str, _name: &str, _obj: &Self::InsertRepr) -> CosmosisResult<Self> {
-        // TODO implement
-        unimplemented!()
+    fn direct_replace_datablock(db: &mut DataBlock, section: &str, name: &str, obj: &Self::InsertRepr) -> CosmosisResult<Self> {
+        let result = Self::direct_get_datablock(db, section, name)?;
+        let retval = unsafe {
+            bindings::root::c_datablock_replace_double_array_1d(db.ptr,
+                                                                CString::new(section).unwrap().as_ptr(),
+                                                                CString::new(name).unwrap().as_ptr(),
+                                                                obj.as_ptr(),
+                                                                obj.len() as raw::c_int)
+        };
+        wrap_cosmosis_result!(retval, result, "Could not replace value at (section, name): ({}, {})",
+                              section, name)
     }
 }
 
