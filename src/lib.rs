@@ -328,59 +328,6 @@ gen_cosmosis_data_type!(Complex<f64>, DBT_COMPLEX, Complex { re: 0.0, im: 0.0 },
                         bindings::root::c_datablock_put_complex,
                         bindings::root::c_datablock_replace_complex);
 
-impl CosmosisDataType for CString {
-    type InsertRepr = CStr;
-
-    fn cosmosis_type() -> datablock_type_t {
-        datablock_type_t::DBT_STRING
-    }
-
-    fn direct_get_datablock(db: &DataBlock, section: &str, name: &str) -> CosmosisResult<Self> {
-        let mut cstr: *mut raw::c_char = std::ptr::null_mut();
-        let retval = unsafe {
-            bindings::root::c_datablock_get_string(db.ptr,
-                                                   CString::new(section).unwrap().as_ptr(),
-                                                   CString::new(name).unwrap().as_ptr(),
-                                                   &mut cstr)
-        };
-        wrap_cosmosis_result!(retval, 
-            unsafe {
-                let cstr_ref = CStr::from_ptr(cstr);
-                // Yes, this would be an unnecessary allocation, but we must clone
-                // into Rust's heap because otherwise (i.e. CString::from_raw(cstr))
-                // Rust's memory allocator would attempt to free a pointer from C's
-                // heap - undefined
-                let output_string = CString::new(cstr_ref.to_str().unwrap()).unwrap();
-                libc::free(cstr as *mut libc::c_void);
-                output_string
-            },
-            "Could not get value at (section, name): ({}, {})", section, name)
-    }
-
-    fn direct_put_datablock(db: &mut DataBlock, section: &str, name: &str, obj: &CStr) -> CosmosisResult<()> {
-        let retval = unsafe {
-            bindings::root::c_datablock_put_string(db.ptr,
-                                                   CString::new(section).unwrap().as_ptr(),
-                                                   CString::new(name).unwrap().as_ptr(),
-                                                   obj.as_ptr())
-        };
-        wrap_cosmosis_result!(retval, (), "Could not put value at (section, name): ({}, {})",
-                              section, name)
-    }
-
-    fn direct_replace_datablock(db: &mut DataBlock, section: &str, name: &str, obj: &CStr) -> CosmosisResult<Self> {
-        let result = Self::direct_get_datablock(db, section, name)?;
-        let retval = unsafe {
-            bindings::root::c_datablock_replace_string(db.ptr,
-                                                       CString::new(section).unwrap().as_ptr(),
-                                                       CString::new(name).unwrap().as_ptr(),
-                                                       obj.as_ptr())
-        };
-        wrap_cosmosis_result!(retval, result,
-                              "Could not replace value at (section, name): ({}, {})", section, name)
-    }
-}
-
 macro_rules! gen_cosmosis_vector_type {
     ( $rust_name:ty, $cosmo_name:ident,
       $getter:path, $putter:path, $replacer:path ) => {
@@ -475,6 +422,81 @@ gen_cosmosis_vector_type!(Complex<f64>, DBT_COMPLEX1D,
                           bindings::root::c_datablock_put_complex_array_1d,
                           bindings::root::c_datablock_replace_complex_array_1d);
 
+impl CosmosisDataType for CString {
+    type InsertRepr = CStr;
+
+    fn cosmosis_type() -> datablock_type_t {
+        datablock_type_t::DBT_STRING
+    }
+
+    fn direct_get_datablock(db: &DataBlock, section: &str, name: &str) -> CosmosisResult<Self> {
+        let mut cstr: *mut raw::c_char = std::ptr::null_mut();
+        let retval = unsafe {
+            bindings::root::c_datablock_get_string(db.ptr,
+                                                   CString::new(section).unwrap().as_ptr(),
+                                                   CString::new(name).unwrap().as_ptr(),
+                                                   &mut cstr)
+        };
+        wrap_cosmosis_result!(retval, 
+            unsafe {
+                let cstr_ref = CStr::from_ptr(cstr);
+                // Yes, this would be an unnecessary allocation, but we must clone
+                // into Rust's heap because otherwise (i.e. CString::from_raw(cstr))
+                // Rust's memory allocator would attempt to free a pointer from C's
+                // heap - undefined
+                let output_string = CString::new(cstr_ref.to_str().unwrap()).unwrap();
+                libc::free(cstr as *mut libc::c_void);
+                output_string
+            },
+            "Could not get value at (section, name): ({}, {})", section, name)
+    }
+
+    fn direct_put_datablock(db: &mut DataBlock, section: &str, name: &str, obj: &CStr) -> CosmosisResult<()> {
+        let retval = unsafe {
+            bindings::root::c_datablock_put_string(db.ptr,
+                                                   CString::new(section).unwrap().as_ptr(),
+                                                   CString::new(name).unwrap().as_ptr(),
+                                                   obj.as_ptr())
+        };
+        wrap_cosmosis_result!(retval, (), "Could not put value at (section, name): ({}, {})",
+                              section, name)
+    }
+
+    fn direct_replace_datablock(db: &mut DataBlock, section: &str, name: &str, obj: &CStr) -> CosmosisResult<Self> {
+        let result = Self::direct_get_datablock(db, section, name)?;
+        let retval = unsafe {
+            bindings::root::c_datablock_replace_string(db.ptr,
+                                                       CString::new(section).unwrap().as_ptr(),
+                                                       CString::new(name).unwrap().as_ptr(),
+                                                       obj.as_ptr())
+        };
+        wrap_cosmosis_result!(retval, result,
+                              "Could not replace value at (section, name): ({}, {})", section, name)
+    }
+}
+
+impl CosmosisGettable for String {
+    type InternalType = CString;
+    fn get_datablock(db: &DataBlock, section: &str, name: &str) -> CosmosisResult<Self> {
+        CString::direct_get_datablock(db, section, name)
+                .map(|cstr| cstr.into_string().expect("DataBlock should contain valid UTF-8"))
+    }
+}
+
+impl CosmosisStorable for str {
+    type InternalType = CString;
+    type ResultType = String;
+
+    fn put_datablock(db: &mut DataBlock, section: &str, name: &str, obj: &str) -> CosmosisResult<()> {
+        CString::direct_put_datablock(db, section, name, &CString::new(obj).unwrap())
+    }
+
+    fn replace_datablock(db: &mut DataBlock, section: &str, name: &str, obj: &str) -> CosmosisResult<String> {
+        CString::direct_replace_datablock(db, section, name, &CString::new(obj).unwrap())
+                .map(|cstr| cstr.into_string().expect("DataBlock should contain valid UTF-8"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{DataBlock, DATABLOCK_STATUS, datablock_type_t};
@@ -559,6 +581,26 @@ mod tests {
         for (name, val) in data.iter() {
             assert!(db.contains("my_section", name));
             assert_eq!(db.get::<Vec<f64>>("my_section", name).expect("should be present"), &val[..]);
+            assert_eq!(db.get::<f64>("my_section", name).unwrap_err().kind, DATABLOCK_STATUS::DBS_WRONG_VALUE_TYPE);
+        }
+    }
+
+    #[test]
+    fn test_put_get_string() {
+        let mut db = DataBlock::new();
+        let data: Vec<(&'static str, &'static str)> = vec![("a", "artichoke"),
+                                                           ("b", "bear"),
+                                                           ("c", "caterpillar"),
+                                                           ("d", "dandelion")];
+
+        for (name, val) in data.iter() {
+            assert!(db.put::<str, _>("my_section", name, *val).is_ok());
+            assert!(db.contains("my_section", name));
+        }
+
+        for (name, val) in data.iter() {
+            assert!(db.contains("my_section", name));
+            assert_eq!(db.get::<String>("my_section", name).expect("should be present"), *val);
             assert_eq!(db.get::<f64>("my_section", name).unwrap_err().kind, DATABLOCK_STATUS::DBS_WRONG_VALUE_TYPE);
         }
     }
